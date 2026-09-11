@@ -29,17 +29,24 @@
 //! records after it next time. Nothing is claimed; [`Transport::claims`]
 //! answers `None`. The origin URI is `kinesis://stream/shard/sequence`. A
 //! send target is a stream name, or empty for this transport's own.
+//!
+//! The transport is its own far end (ADR-0051): [`Loopback`] stands the
+//! session up at the endpoint's authority and takes the one put.
 
 pub mod client;
 pub mod json;
 pub mod session;
 
+use std::net::TcpListener;
 use std::sync::Mutex;
 use std::time::Duration;
 
 pub use client::{Client, MAX_RECORDS, Position, Record};
+use http::endpoint;
 pub use session::{Event, Session};
-use transport::error::{Result, TransportError};
+use transport::error::{Result, TransportError, protocol_error};
+use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
+use transport::socket;
 use transport::{Arrived, Directions, Transport};
 
 /// The largest record Kinesis carries: one mebibyte.
@@ -212,12 +219,76 @@ impl Transport for KinesisTransport {
     }
 }
 
+impl KinesisTransport {
+    /// Both ends on this machine: the session stands in for Kinesis on an
+    /// ephemeral local port, one stream and one credential, the loopback
+    /// timeout on both sides.
+    #[must_use]
+    pub fn loopback() -> Self {
+        Self::new("http://127.0.0.1:0", "eu-north-1", "orders")
+            .with_credentials("AKID", "secret")
+            .keyed_by("loopback")
+            .timing_out_after(LOOPBACK_TIMEOUT)
+    }
+
+    /// A fresh near end aimed at the session at `address`, with this
+    /// transport's credentials, stream and partition key.
+    fn aimed_at(&self, address: &str) -> Self {
+        let near = Self::new(format!("http://{address}"), &self.region, &self.stream)
+            .with_credentials(&self.access_key, &self.secret_key)
+            .keyed_by(&self.partition_key);
+        match self.timeout {
+            Some(timeout) => near.timing_out_after(timeout),
+            None => near,
+        }
+    }
+}
+
+/// A session listening for its one put.
+struct Serving {
+    session: Session,
+    listener: TcpListener,
+    address: String,
+}
+
+impl FarEnd for Serving {
+    fn address(&self) -> &str {
+        &self.address
+    }
+
+    fn take_one(mut self: Box<Self>) -> Result<Arrived> {
+        match self.session.serve_one(&self.listener)? {
+            Event::Put(arrived) => Ok(arrived),
+            other => Err(protocol_error(format!("{other:?} where a put was due"))),
+        }
+    }
+}
+
+impl Loopback for KinesisTransport {
+    fn ceiling(&self) -> Option<usize> {
+        Some(ceiling())
+    }
+
+    /// The session, bound at the endpoint's authority — `127.0.0.1:0` for
+    /// the loopback — holding this transport's stream.
+    fn far_end(&self) -> Result<Box<dyn FarEnd>> {
+        let (listener, address) = socket::bind_tcp(&endpoint::authority(&self.endpoint)?)?;
+        Ok(Box::new(Serving {
+            session: self.session(),
+            listener,
+            address,
+        }))
+    }
+
+    fn send_to(&self, address: &str, payload: &[u8]) -> Result<()> {
+        self.aimed_at(address).send("", payload)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::TcpListener;
     use std::thread::JoinHandle;
-    use transport::socket;
 
     fn node(endpoint: &str, secret: &str) -> KinesisTransport {
         KinesisTransport::new(endpoint, "eu-north-1", "orders")
@@ -329,6 +400,49 @@ mod tests {
         let over = vec![b'x'; ceiling() + 1];
         let failure = near.send("", &over).expect_err("over the ceiling");
         assert!(!failure.retryable);
+        assert!(failure.message.contains("1048576"), "{failure}");
+    }
+
+    /// The payloads a record must carry whole, and one at the brim.
+    fn edge_payloads() -> Vec<(&'static str, Vec<u8>)> {
+        vec![
+            ("empty", Vec::new()),
+            ("one byte", vec![0x2a]),
+            ("every byte", (0..=255).collect()),
+            ("nul run", vec![0; 512]),
+            ("high bytes", vec![0xff; 512]),
+            ("crlf storm", b"\r\n".repeat(400)),
+            ("the brim", vec![b'k'; ceiling()]),
+        ]
+    }
+
+    #[test]
+    fn a_loopback_round_puts_one_record_and_takes_it_at_the_session() {
+        let kinesis = KinesisTransport::loopback();
+        let arrived = kinesis.round(b"UNA:+.? '").expect("round");
+        assert_eq!(arrived.bytes, b"UNA:+.? '");
+        assert!(
+            arrived
+                .origin_uri
+                .starts_with("kinesis://orders/shardId-000000000000/"),
+            "{}",
+            arrived.origin_uri
+        );
+        assert_eq!(kinesis.name(), "aws-kinesis");
+        assert!(kinesis.refuses(&[0, 0xff]).is_none(), "bytes are bytes");
+    }
+
+    #[test]
+    fn the_loopback_returns_the_edge_payloads_whole_and_refuses_over_the_brim() {
+        let kinesis = KinesisTransport::loopback();
+        assert_eq!(kinesis.ceiling(), Some(1024 * 1024));
+        for (name, payload) in edge_payloads() {
+            let arrived = kinesis.round(&payload).expect(name);
+            assert_eq!(arrived.bytes, payload, "{name}");
+        }
+        let over = vec![b'k'; ceiling() + 1];
+        let failure = kinesis.round(&over).expect_err("over the brim");
+        assert!(failure.message.starts_with("send failed:"), "{failure}");
         assert!(failure.message.contains("1048576"), "{failure}");
     }
 }
