@@ -7,9 +7,9 @@
 //! `__type`, sometimes behind a `#`, and the retry rule reads that name.
 
 use serde_json::{Value, json};
-use transport::error::{Result, TransportError, protocol_error};
+use transport::error::{Result, protocol_error};
 
-use http::message::{Request, Response};
+use http::message::{self, Request, Response};
 
 /// The content type every JSON 1.1 request and answer carries.
 pub const CONTENT_TYPE: &str = "application/x-amz-json-1.1";
@@ -48,36 +48,33 @@ pub fn document(request: &Request) -> Result<Value> {
 
 /// A 2xx answer as the document it carries — `Null` where it carries none;
 /// anything else as a failure naming the status and the exception,
-/// retryable where the service says come back.
+/// retryable where HTTP or the service says come back.
 ///
 /// # Errors
 /// Where the status is not 2xx, or the answer is not JSON.
-pub fn judge(response: &Response) -> Result<Value> {
-    if (200..300).contains(&response.status) {
-        if response.body.is_empty() {
-            return Ok(Value::Null);
-        }
-        return serde_json::from_slice(&response.body)
-            .map_err(|e| protocol_error(format!("an answer that is not JSON: {e}")));
-    }
-    let kind = serde_json::from_slice::<Value>(&response.body)
-        .ok()
-        .and_then(|error| error["__type"].as_str().map(exception))
-        .unwrap_or_default();
-    let retryable = response.status >= 500
-        || response.status == 408
-        || response.status == 429
-        || matches!(
-            kind.as_str(),
+pub fn judge(response: Response) -> Result<Value> {
+    let answer = message::judge("Kinesis", response, kind, |kind| {
+        matches!(
+            kind,
             "ProvisionedThroughputExceededException"
                 | "LimitExceededException"
                 | "KMSThrottlingException"
                 | "InternalFailure"
-        );
-    Err(TransportError {
-        message: format!("Kinesis answered {} {kind}", response.status),
-        retryable,
-    })
+        )
+    })?;
+    if answer.body.is_empty() {
+        return Ok(Value::Null);
+    }
+    serde_json::from_slice(&answer.body)
+        .map_err(|e| protocol_error(format!("an answer that is not JSON: {e}")))
+}
+
+/// The exception an error answer names in `__type`, or nothing.
+fn kind(response: &Response) -> String {
+    serde_json::from_slice::<Value>(&response.body)
+        .ok()
+        .and_then(|error| error["__type"].as_str().map(exception))
+        .unwrap_or_default()
 }
 
 /// The exception a `__type` names, without the namespace some services
@@ -130,12 +127,12 @@ mod tests {
 
     #[test]
     fn a_throttle_or_a_server_failure_is_worth_repeating_and_a_client_one_is_not() {
-        assert!(judge(&Response::new(503)).expect_err("server").retryable);
-        assert!(judge(&Response::new(429)).expect_err("throttled").retryable);
+        assert!(judge(Response::new(503)).expect_err("server").retryable);
+        assert!(judge(Response::new(429)).expect_err("throttled").retryable);
         let throttled = error(400, "ProvisionedThroughputExceededException", "slow down");
-        assert!(judge(&throttled).expect_err("throughput").retryable);
+        assert!(judge(throttled).expect_err("throughput").retryable);
         let missing =
-            judge(&error(400, "ResourceNotFoundException", "no stream")).expect_err("not found");
+            judge(error(400, "ResourceNotFoundException", "no stream")).expect_err("not found");
         assert!(!missing.retryable);
         assert_eq!(
             missing.message,
@@ -144,14 +141,14 @@ mod tests {
         let namespaced = Response::new(400)
             .body(br#"{"__type":"com.amazon.coral.validate#ValidationException"}"#);
         assert_eq!(
-            judge(&namespaced).expect_err("validation").message,
+            judge(namespaced).expect_err("validation").message,
             "Kinesis answered 400 ValidationException"
         );
-        assert_eq!(judge(&Response::new(200)).expect("empty"), Value::Null);
+        assert_eq!(judge(Response::new(200)).expect("empty"), Value::Null);
         assert_eq!(
-            judge(&answer(&json!({ "ShardId": "s" }))).expect("ok")["ShardId"],
+            judge(answer(&json!({ "ShardId": "s" }))).expect("ok")["ShardId"],
             "s"
         );
-        assert!(judge(&Response::new(200).body(b"{")).is_err());
+        assert!(judge(Response::new(200).body(b"{")).is_err());
     }
 }

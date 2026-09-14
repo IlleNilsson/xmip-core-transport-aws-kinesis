@@ -17,7 +17,7 @@ use transport::error::{Result, protocol_error};
 use crate::json;
 use http::endpoint;
 use http::message;
-use transport_aws_sqs::sigv4::{self, Signer};
+use http::sigv4::{self, Signer};
 
 /// The most one `GetRecords` hands back.
 pub const MAX_RECORDS: u16 = 10_000;
@@ -149,7 +149,7 @@ impl Client {
         let request = json::request(action, document).header("Host", &self.host);
         let signed = self.signer.sign(request, &sigv4::now());
         let stream = endpoint::connect(&self.endpoint, self.timeout)?;
-        json::judge(&message::exchange(stream, &signed)?)
+        json::judge(message::exchange(stream, &signed)?)
     }
 }
 
