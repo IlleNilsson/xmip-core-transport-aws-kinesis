@@ -18,9 +18,10 @@
 //! session.rs   the far end a test or the playground runs on loopback
 //! ```
 //!
-//! The endpoint and HTTP itself come from the http technology, the signer
-//! for a service that is not S3 from the aws-sqs technology, which built
-//! it for this crate to take (ADR-0044).
+//! The endpoint, HTTP itself, Signature Version 4 and the judgement of an
+//! answer come from the http technology (ADR-0044). Until 2026-09-14 the
+//! signer came from the aws-sqs technology, a sideways import the record
+//! forbids; what rides on HTTP is shared through the http technology.
 //!
 //! A record is bytes, base64 on the wire, one mebibyte at most:
 //! [`ceiling`]. A shard is read, never consumed — Kinesis keeps records for
