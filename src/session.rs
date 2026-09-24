@@ -14,17 +14,17 @@ use std::collections::BTreeMap;
 use std::net::TcpListener;
 use std::time::Duration;
 
-use base64::Engine as _;
-use base64::engine::general_purpose::STANDARD;
+use codec::base64;
 use serde_json::{Value, json};
 use transport::Arrived;
 use transport::error::Result;
 
+use crate::KINESIS;
 use crate::SHARD;
-use crate::json;
+use aws::json;
+use aws::sigv4::Signer;
 use http::message::{Request, Response};
 use http::server;
-use http::sigv4::Signer;
 
 /// What the client did, as [`Session::serve_one`] reports it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -104,7 +104,7 @@ impl Session {
             Ok(document) => document,
             Err(failure) => return refused(400, "SerializationException", &failure.message),
         };
-        match json::action(request) {
+        match KINESIS.action(request) {
             Some("PutRecord") => self.put(&document),
             Some("GetShardIterator") => self.iterate(&document),
             Some("GetRecords") => self.read(&document),
@@ -118,7 +118,7 @@ impl Session {
 
     fn put(&mut self, document: &Value) -> (Event, Response) {
         let stream = field(document, "StreamName");
-        let Ok(data) = STANDARD.decode(field(document, "Data")) else {
+        let Ok(data) = base64::decode(field(document, "Data")) else {
             return refused(400, "SerializationException", "Data that is not base64");
         };
         let Some(held) = self.streams.get_mut(stream) else {
@@ -200,7 +200,7 @@ impl Session {
                 json!({
                     "SequenceNumber": r.sequence_number,
                     "PartitionKey": r.partition_key,
-                    "Data": STANDARD.encode(&r.data),
+                    "Data": base64::encode(&r.data),
                 })
             })
             .collect();
@@ -249,7 +249,9 @@ mod tests {
 
     fn signed(action: &str, document: &Value) -> Request {
         Signer::new("kinesis", "r", "AKID", "secret").sign(
-            json::request(action, document).header("Host", "kinesis.local"),
+            KINESIS
+                .request(action, document)
+                .header("Host", "kinesis.local"),
             AT,
         )
     }
@@ -301,7 +303,9 @@ mod tests {
         let (_, response) = session.answer(&signed("ListStreams", &json!({})));
         assert_eq!(response.status, 400);
         let other = Signer::new("kinesis", "r", "AKID", "wrong").sign(
-            json::request("PutRecord", &put).header("Host", "kinesis.local"),
+            KINESIS
+                .request("PutRecord", &put)
+                .header("Host", "kinesis.local"),
             AT,
         );
         let (event, response) = session.answer(&other);

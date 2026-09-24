@@ -13,15 +13,16 @@
 //! (ADR-0033).
 //!
 //! ```text
-//! json.rs      the JSON 1.1 protocol: the request, the answer, the error
 //! client.rs    Xmip's side: put a record, get an iterator, get records
 //! session.rs   the far end a test or the playground runs on loopback
 //! ```
 //!
-//! The endpoint, HTTP itself, Signature Version 4 and the judgement of an
-//! answer come from the http technology (ADR-0044). Until 2026-09-14 the
-//! signer came from the aws-sqs technology, a sideways import the record
-//! forbids; what rides on HTTP is shared through the http technology.
+//! The endpoint, HTTP itself and the judgement of an answer come from the
+//! http technology; Signature Version 4 and the JSON 1.1 protocol from the
+//! AWS crate, where [`KINESIS`] names this service to it (ADR-0044). Until
+//! 2026-09-14 the signer came from the aws-sqs technology, a sideways
+//! import the record forbids, and JSON 1.1 was this crate's own until the
+//! owner's ruling of 2026-09-22 put what AWS speaks in the AWS crate.
 //!
 //! A record is bytes, base64 on the wire, one mebibyte at most:
 //! [`ceiling`]. A shard is read, never consumed — Kinesis keeps records for
@@ -35,13 +36,13 @@
 //! session up at the endpoint's authority and takes the one put.
 
 pub mod client;
-pub mod json;
 pub mod session;
 
 use std::net::TcpListener;
 use std::sync::Mutex;
 use std::time::Duration;
 
+use aws::json;
 pub use client::{Client, MAX_RECORDS, Position, Record};
 use http::endpoint;
 pub use session::{Event, Session};
@@ -49,6 +50,20 @@ use transport::error::{Result, TransportError, protocol_error};
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
 use transport::socket;
 use transport::{Arrived, Directions, Transport};
+
+/// Kinesis as the JSON 1.1 protocol names it: the prefix of every target,
+/// and the exceptions that say come back — a shard's throughput, the
+/// account's limit, the key service's throttle, a failure of its own.
+pub const KINESIS: json::Service = json::Service {
+    name: "Kinesis",
+    target: "Kinesis_20131202",
+    repeatable: &[
+        "ProvisionedThroughputExceededException",
+        "LimitExceededException",
+        "KMSThrottlingException",
+        "InternalFailure",
+    ],
+};
 
 /// The largest record Kinesis carries: one mebibyte.
 #[must_use]

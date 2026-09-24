@@ -9,15 +9,14 @@
 
 use std::time::Duration;
 
-use base64::Engine as _;
-use base64::engine::general_purpose::STANDARD;
+use codec::base64;
 use serde_json::{Value, json};
 use transport::error::{Result, protocol_error};
 
-use crate::json;
+use crate::KINESIS;
+use aws::sigv4::{self, Signer};
 use http::endpoint;
 use http::message;
-use http::sigv4::{self, Signer};
 
 /// The most one `GetRecords` hands back.
 pub const MAX_RECORDS: u16 = 10_000;
@@ -96,7 +95,7 @@ impl Client {
         let document = json!({
             "StreamName": stream,
             "PartitionKey": partition_key,
-            "Data": STANDARD.encode(bytes),
+            "Data": base64::encode(bytes),
         });
         let answer = self.call("PutRecord", &document)?;
         Ok((text(&answer, "ShardId"), text(&answer, "SequenceNumber")))
@@ -146,10 +145,10 @@ impl Client {
     }
 
     fn call(&self, action: &str, document: &Value) -> Result<Value> {
-        let request = json::request(action, document).header("Host", &self.host);
+        let request = KINESIS.request(action, document).header("Host", &self.host);
         let signed = self.signer.sign(request, &sigv4::now());
         let stream = endpoint::connect(&self.endpoint, self.timeout)?;
-        json::judge(message::exchange(stream, &signed)?)
+        KINESIS.judge(message::exchange(stream, &signed)?)
     }
 }
 
@@ -158,8 +157,7 @@ fn text(document: &Value, name: &str) -> String {
 }
 
 fn record(value: &Value) -> Result<Record> {
-    let data = STANDARD
-        .decode(value["Data"].as_str().unwrap_or_default())
+    let data = base64::decode(value["Data"].as_str().unwrap_or_default())
         .map_err(|e| protocol_error(format!("a record whose Data is not base64: {e}")))?;
     Ok(Record {
         sequence_number: text(value, "SequenceNumber"),
