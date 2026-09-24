@@ -46,7 +46,9 @@ use aws::json;
 pub use client::{Client, MAX_RECORDS, Position, Record};
 use http::endpoint;
 pub use session::{Event, Session};
+use transport::ceiling;
 use transport::error::{Result, TransportError, protocol_error};
+use transport::listening::Listening;
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
 use transport::socket;
 use transport::{Arrived, Directions, Transport};
@@ -222,13 +224,7 @@ impl Transport for KinesisTransport {
     }
 
     fn send(&self, target: &str, bytes: &[u8]) -> Result<()> {
-        if bytes.len() > ceiling() {
-            return Err(TransportError::permanent(format!(
-                "{} bytes is over the {} one Kinesis record carries",
-                bytes.len(),
-                ceiling()
-            )));
-        }
+        ceiling::within(bytes.len(), ceiling(), "one Kinesis record carries")?;
         self.client()?
             .put_record(self.resolve(target), &self.partition_key, bytes)
             .map(|_| ())
@@ -260,26 +256,6 @@ impl KinesisTransport {
     }
 }
 
-/// A session listening for its one put.
-struct Serving {
-    session: Session,
-    listener: TcpListener,
-    address: String,
-}
-
-impl FarEnd for Serving {
-    fn address(&self) -> &str {
-        &self.address
-    }
-
-    fn take_one(mut self: Box<Self>) -> Result<Arrived> {
-        match self.session.serve_one(&self.listener)? {
-            Event::Put(arrived) => Ok(arrived),
-            other => Err(protocol_error(format!("{other:?} where a put was due"))),
-        }
-    }
-}
-
 impl Loopback for KinesisTransport {
     fn ceiling(&self) -> Option<usize> {
         Some(ceiling())
@@ -288,12 +264,14 @@ impl Loopback for KinesisTransport {
     /// The session, bound at the endpoint's authority — `127.0.0.1:0` for
     /// the loopback — holding this transport's stream.
     fn far_end(&self) -> Result<Box<dyn FarEnd>> {
-        let (listener, address) = socket::bind_tcp(&endpoint::authority(&self.endpoint)?)?;
-        Ok(Box::new(Serving {
-            session: self.session(),
-            listener,
-            address,
-        }))
+        let mut session = self.session();
+        Ok(Box::new(Listening::new(
+            move |listener: &TcpListener| match session.serve_one(listener)? {
+                Event::Put(arrived) => Ok(arrived),
+                other => Err(protocol_error(format!("{other:?} where a put was due"))),
+            },
+            socket::bind_tcp(&endpoint::authority(&self.endpoint)?)?,
+        )))
     }
 
     fn send_to(&self, address: &str, payload: &[u8]) -> Result<()> {
