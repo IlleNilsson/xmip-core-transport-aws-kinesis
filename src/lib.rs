@@ -44,7 +44,7 @@ use std::time::Duration;
 
 use aws::json;
 pub use client::{Client, MAX_RECORDS, Position, Record};
-use http::endpoint;
+use net::Endpoint;
 pub use session::{Event, Session};
 use transport::ceiling;
 use transport::error::{Result, TransportError, protocol_error};
@@ -270,7 +270,7 @@ impl Loopback for KinesisTransport {
                 Event::Put(arrived) => Ok(arrived),
                 other => Err(protocol_error(format!("{other:?} where a put was due"))),
             },
-            socket::bind_tcp(&endpoint::authority(&self.endpoint)?)?,
+            socket::bind_tcp(&Endpoint::parse(&self.endpoint)?.address())?,
         )))
     }
 
