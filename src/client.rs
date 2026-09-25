@@ -16,7 +16,7 @@ use transport::error::{Result, protocol_error};
 use crate::KINESIS;
 use aws::sigv4::{self, Signer};
 use http::endpoint;
-use http::message;
+use net::Endpoint;
 
 /// The most one `GetRecords` hands back.
 pub const MAX_RECORDS: u16 = 10_000;
@@ -53,8 +53,7 @@ impl Position<'_> {
 }
 
 pub struct Client {
-    endpoint: String,
-    host: String,
+    endpoint: Endpoint,
     signer: Signer,
     timeout: Option<Duration>,
 }
@@ -67,8 +66,7 @@ impl Client {
     /// Where `endpoint` is not an HTTP URL.
     pub fn new(endpoint: &str, region: &str, access_key: &str, secret_key: &str) -> Result<Self> {
         Ok(Self {
-            endpoint: endpoint.to_string(),
-            host: endpoint::authority(endpoint)?,
+            endpoint: Endpoint::parse(endpoint)?,
             signer: Signer::new("kinesis", region, access_key, secret_key),
             timeout: None,
         })
@@ -145,10 +143,12 @@ impl Client {
     }
 
     fn call(&self, action: &str, document: &Value) -> Result<Value> {
-        let request = KINESIS.request(action, document).header("Host", &self.host);
+        let request = KINESIS
+            .request(action, document)
+            .header("Host", &self.endpoint.authority());
         let signed = self.signer.sign(request, &sigv4::now());
         let stream = endpoint::connect(&self.endpoint, self.timeout)?;
-        KINESIS.judge(message::exchange(stream, &signed)?)
+        KINESIS.judge(net::http::exchange(stream, &signed)?)
     }
 }
 
