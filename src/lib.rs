@@ -44,6 +44,7 @@ use std::time::Duration;
 
 use aws::json;
 pub use client::{Client, MAX_RECORDS, Position, Record};
+use http::endpoint::Connections;
 use net::Endpoint;
 pub use session::{Event, Session};
 use transport::ceiling;
@@ -87,6 +88,9 @@ pub struct KinesisTransport {
     partition_key: String,
     position: Mutex<Option<String>>,
     timeout: Option<Duration>,
+    /// The connections kept to the service, shared by every client this
+    /// makes.
+    connections: Connections,
 }
 
 impl KinesisTransport {
@@ -105,6 +109,7 @@ impl KinesisTransport {
             partition_key: "xmip".to_string(),
             position: Mutex::new(None),
             timeout: None,
+            connections: Connections::new(),
         }
     }
 
@@ -148,6 +153,7 @@ impl KinesisTransport {
             &self.access_key,
             &self.secret_key,
         )?;
+        let client = client.sharing(self.connections.clone());
         Ok(match self.timeout {
             Some(timeout) => client.timing_out_after(timeout),
             None => client,
