@@ -265,6 +265,7 @@ mod tests {
         assert!(
             response
                 .text()
+                .expect("text")
                 .contains("\"ShardId\":\"shardId-000000000000\"")
         );
         let origin = origin("orders", "000000000000000000001");
@@ -276,13 +277,19 @@ mod tests {
             "StreamName": "orders", "ShardId": SHARD, "ShardIteratorType": "TRIM_HORIZON"
         });
         let (_, response) = session.answer(&signed("GetShardIterator", &iterate));
-        assert!(response.text().contains("\"ShardIterator\":\"orders/0\""));
-        let read = json!({ "ShardIterator": "orders/0", "Limit": 10 });
-        let (event, response) = session.answer(&signed("GetRecords", &read));
-        assert!(response.text().contains("\"Data\":\"YTxi\""));
         assert!(
             response
                 .text()
+                .expect("text")
+                .contains("\"ShardIterator\":\"orders/0\"")
+        );
+        let read = json!({ "ShardIterator": "orders/0", "Limit": 10 });
+        let (event, response) = session.answer(&signed("GetRecords", &read));
+        assert!(response.text().expect("text").contains("\"Data\":\"YTxi\""));
+        assert!(
+            response
+                .text()
+                .expect("text")
                 .contains("\"NextShardIterator\":\"orders/1\"")
         );
         assert!(matches!(event, Event::Read { count: 1, .. }));
@@ -299,7 +306,7 @@ mod tests {
             "StreamName": "orders", "ShardId": SHARD, "ShardIteratorType": "LATEST"
         });
         let (_, response) = session.answer(&signed("GetShardIterator", &latest));
-        assert!(response.text().contains("\"orders/1\""));
+        assert!(response.text().expect("text").contains("\"orders/1\""));
         let (_, response) = session.answer(&signed("ListStreams", &json!({})));
         assert_eq!(response.status, 400);
         let other = Signer::new("kinesis", "r", "AKID", "wrong").sign(
