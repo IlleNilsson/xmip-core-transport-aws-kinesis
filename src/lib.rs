@@ -51,7 +51,8 @@ use transport::error::{Result, TransportError, protocol_error};
 use transport::listening::Listening;
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
 use transport::socket;
-use transport::{Arrived, Directions, Transport};
+use transport::{Arrived, Configured, Directions, Transport};
+use xcore::settings::{Applies, Fixed, Kind, Presence, Read, Setting, Settings};
 
 /// Kinesis as the JSON 1.1 protocol names it: the prefix of every target,
 /// and the exceptions that say come back — a shard's throughput, the
@@ -231,6 +232,69 @@ impl Transport for KinesisTransport {
     }
 }
 
+impl Configured for KinesisTransport {
+    /// The address is the Kinesis endpoint, `https://kinesis.<region>.
+    /// amazonaws.com`. The access key and its secret are the Location's
+    /// credentials, not settings: a secret never is.
+    const SETTINGS: &'static Settings = &Settings {
+        technology: env!("CARGO_PKG_NAME"),
+        settings: &[
+            Setting {
+                name: "region",
+                kind: Kind::Text,
+                presence: Presence::Required,
+                meaning: "The AWS region requests are signed for, eu-north-1.",
+                applies: Applies::Both,
+            },
+            Setting {
+                name: "stream",
+                kind: Kind::Text,
+                presence: Presence::Required,
+                meaning: "The data stream read from, and put to when a send target names none.",
+                applies: Applies::Both,
+            },
+            Setting {
+                name: "shard",
+                kind: Kind::Text,
+                presence: Presence::Default(Fixed::Text(SHARD)),
+                meaning: "The shard a Receive Location reads; the stream's first when left out.",
+                applies: Applies::Receive,
+            },
+            Setting {
+                name: "partition_key",
+                kind: Kind::Text,
+                presence: Presence::Optional,
+                meaning: "The partition key a record is put under, which decides its shard; \
+                          one fixed key for every record when left out.",
+                applies: Applies::Send,
+            },
+            Setting {
+                name: "timeout",
+                kind: Kind::Duration,
+                presence: Presence::Optional,
+                meaning: "How long an endpoint that stops answering is waited on; unbounded \
+                          when left out.",
+                applies: Applies::Both,
+            },
+        ],
+    };
+
+    fn configured(address: &str, settings: &Read) -> Result<Self> {
+        // The access key and secret come through the Location's credentials.
+        let mut transport = Self::new(address, settings.text("region"), settings.text("stream"));
+        if let Some(shard) = settings.optional_text("shard") {
+            transport = transport.on_shard(shard);
+        }
+        if let Some(partition_key) = settings.optional_text("partition_key") {
+            transport = transport.keyed_by(partition_key);
+        }
+        Ok(match settings.optional_duration("timeout") {
+            Some(timeout) => transport.timing_out_after(timeout),
+            None => transport,
+        })
+    }
+}
+
 impl KinesisTransport {
     /// Both ends on this machine: the session stands in for Kinesis on an
     /// ephemeral local port, one stream and one credential, the loopback
@@ -289,6 +353,45 @@ mod tests {
             .with_credentials("AKID", secret)
             .keyed_by("probe")
             .timing_out_after(Duration::from_secs(2))
+    }
+
+    #[test]
+    fn kinesis_declares_its_settings_and_reads_through_them() {
+        use xcore::settings::Given;
+        assert_eq!(KinesisTransport::SETTINGS.problems(), Vec::<String>::new());
+        let text = |name: &str, value: &str| (name.to_string(), Given::Text(value.to_string()));
+        let endpoint = "https://kinesis.eu-north-1.amazonaws.com";
+        let received = KinesisTransport::open(
+            endpoint,
+            Applies::Receive,
+            &[text("region", "eu-north-1"), text("stream", "orders")],
+        )
+        .expect("built");
+        assert_eq!(received.endpoint, endpoint);
+        assert_eq!(
+            (received.region.as_str(), received.stream.as_str()),
+            ("eu-north-1", "orders")
+        );
+        assert_eq!(received.shard, SHARD);
+        let sent = KinesisTransport::open(
+            endpoint,
+            Applies::Send,
+            &[
+                text("region", "eu-north-1"),
+                text("stream", "orders"),
+                text("partition_key", "customer"),
+                text("timeout", "5s"),
+            ],
+        )
+        .expect("built");
+        assert_eq!(sent.partition_key, "customer");
+        assert_eq!(sent.timeout, Some(Duration::from_secs(5)));
+        let Err(refused) =
+            KinesisTransport::open(endpoint, Applies::Send, &[text("region", "eu-north-1")])
+        else {
+            panic!("the stream is required");
+        };
+        assert!(refused.message.contains("\"stream\""), "{refused}");
     }
 
     fn serve(
