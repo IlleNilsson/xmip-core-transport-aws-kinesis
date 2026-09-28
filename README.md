@@ -4,6 +4,8 @@ Amazon Kinesis Data Streams transport: Signature Version 4 over the JSON API —
 
 Signature Version 4 and the JSON 1.1 protocol come from [xmip-core-transport-aws](https://github.com/IlleNilsson/xmip-core-transport-aws), where every AWS technology shares what AWS speaks over HTTP (ADR-0044, amendment 2026-09-24); HTTP itself comes from [xmip-core-transport-http](https://github.com/IlleNilsson/xmip-core-transport-http).
 
+A Receive Location reads on with the `NextShardIterator` the last read handed back, and asks `GetShardIterator` for a new one only on its first receive or where the kept one is refused — expired after five minutes unused, or its shard gone. Until 2026-09-28 every receive asked for a new iterator.
+
 Requests go on connections kept between them (`http::endpoint::Connections`, offering HTTP/1.1): the transport holds them and hands them to every client it makes, so a call costs one exchange and not a connect, a TLS handshake and a `Connection: close`, as it did until 2026-09-27.
 
 ## Toolchain
