@@ -46,8 +46,8 @@ use aws::json;
 pub use client::{Client, MAX_RECORDS, Position, Record};
 use http::endpoint::Connections;
 use net::Endpoint;
+use net::ceiling;
 pub use session::{Event, Session};
-use transport::ceiling;
 use transport::error::{Result, TransportError, protocol_error};
 use transport::listening::Listening;
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
@@ -78,6 +78,15 @@ pub const fn ceiling() -> usize {
 /// The one shard a stream opens with, and the one the session holds.
 pub const SHARD: &str = "shardId-000000000000";
 
+/// Where a Receive Location reads its shard from: the sequence number it
+/// last handed on, and the iterator the last read handed back, kept so the
+/// next read asks for no new one.
+#[derive(Debug, Default)]
+struct Reading {
+    position: Option<String>,
+    iterator: Option<String>,
+}
+
 pub struct KinesisTransport {
     endpoint: String,
     region: String,
@@ -86,7 +95,7 @@ pub struct KinesisTransport {
     access_key: String,
     secret_key: String,
     partition_key: String,
-    position: Mutex<Option<String>>,
+    reading: Mutex<Reading>,
     timeout: Option<Duration>,
     /// The connections kept to the service, shared by every client this
     /// makes.
@@ -107,7 +116,7 @@ impl KinesisTransport {
             access_key: String::new(),
             secret_key: String::new(),
             partition_key: "xmip".to_string(),
-            position: Mutex::new(None),
+            reading: Mutex::new(Reading::default()),
             timeout: None,
             connections: Connections::new(),
         }
@@ -123,14 +132,14 @@ impl KinesisTransport {
 
     /// Read this shard rather than the first.
     #[must_use]
-    pub fn on_shard(mut self, shard: &str) -> Self {
+    fn on_shard(mut self, shard: &str) -> Self {
         self.shard = shard.to_string();
         self
     }
 
     /// Put records under this partition key — what decides their shard.
     #[must_use]
-    pub fn keyed_by(mut self, partition_key: &str) -> Self {
+    fn keyed_by(mut self, partition_key: &str) -> Self {
         self.partition_key = partition_key.to_string();
         self
     }
@@ -177,9 +186,12 @@ impl KinesisTransport {
     /// # Errors
     /// Where a receive panicked holding the position.
     pub fn position(&self) -> Result<Option<String>> {
-        self.position
+        Ok(self.reading()?.position.clone())
+    }
+
+    fn reading(&self) -> Result<std::sync::MutexGuard<'_, Reading>> {
+        self.reading
             .lock()
-            .map(|held| held.clone())
             .map_err(|_| TransportError::permanent("the shard position was poisoned"))
     }
 
@@ -207,18 +219,28 @@ impl Transport for KinesisTransport {
     /// none has been.
     fn receive(&self) -> Result<Vec<Arrived>> {
         let client = self.client()?;
-        let mut position = self
-            .position
-            .lock()
-            .map_err(|_| TransportError::permanent("the shard position was poisoned"))?;
-        let from = position
-            .as_deref()
-            .map_or(Position::Oldest, Position::After);
-        let iterator = client.shard_iterator(&self.stream, &self.shard, from)?;
-        let (records, _) = client.get_records(&iterator, MAX_RECORDS)?;
+        let mut reading = self.reading()?;
+        // The iterator the last read handed back, where it is still good;
+        // a new one from the position where it is missing or failed —
+        // expired after five minutes unused, or its shard gone.
+        let kept = reading
+            .iterator
+            .take()
+            .and_then(|iterator| client.get_records(&iterator, MAX_RECORDS).ok());
+        let (records, next) = if let Some(read) = kept {
+            read
+        } else {
+            let from = reading
+                .position
+                .as_deref()
+                .map_or(Position::Oldest, Position::After);
+            let iterator = client.shard_iterator(&self.stream, &self.shard, from)?;
+            client.get_records(&iterator, MAX_RECORDS)?
+        };
+        reading.iterator = next;
         let mut arrived = Vec::with_capacity(records.len());
         for record in records {
-            *position = Some(record.sequence_number.clone());
+            reading.position = Some(record.sequence_number.clone());
             arrived.push(Arrived::new(
                 format!(
                     "kinesis://{}/{}/{}",
@@ -417,9 +439,9 @@ mod tests {
     fn what_is_put_to_a_session_is_read_back_in_order_and_the_place_moves_on() {
         let (listener, address) = socket::bind_tcp("127.0.0.1:0").expect("bind");
         let near = node(&format!("http://{address}"), "secret");
-        // Two puts, a receive, an empty receive, a put, a receive: each
-        // receive an iterator and a read.
-        let far_end = serve(near.session(), listener, 9);
+        // Two puts, a receive, an empty receive, a put, a receive: an
+        // iterator for the first receive, and a read for each.
+        let far_end = serve(near.session(), listener, 7);
         near.send("", b"UNA:+.? '").expect("its own stream");
         near.send("orders", &[0, 0xff, b'\r', b'\n'])
             .expect("a stream");
@@ -455,11 +477,30 @@ mod tests {
             ))
         );
         assert!(matches!(&events[2], Event::Iterated { kind, .. } if kind == "TRIM_HORIZON"));
-        assert!(
-            matches!(&events[4], Event::Iterated { kind, .. } if kind == "AFTER_SEQUENCE_NUMBER")
-        );
-        assert!(matches!(events[5], Event::Read { count: 0, .. }));
-        assert!(matches!(events[8], Event::Read { count: 1, .. }));
+        assert!(matches!(events[3], Event::Read { count: 2, .. }));
+        // The next reads go on with the iterator the last handed back.
+        assert!(matches!(events[4], Event::Read { count: 0, .. }));
+        assert!(matches!(events[6], Event::Read { count: 1, .. }));
+        let iterated = |e: &&Event| matches!(e, Event::Iterated { .. });
+        assert_eq!(events.iter().filter(iterated).count(), 1);
+    }
+
+    #[test]
+    fn an_iterator_the_service_no_longer_takes_is_asked_for_again() {
+        let (listener, address) = socket::bind_tcp("127.0.0.1:0").expect("bind");
+        let near = node(&format!("http://{address}"), "secret");
+        // A put, then a receive whose kept iterator is refused, as an
+        // expired one is: the refusal, a new iterator and its read.
+        let far_end = serve(near.session(), listener, 4);
+        near.send("", b"after").expect("put");
+        near.reading().expect("held").iterator = Some("orders/expired".to_string());
+        let arrived = near.receive().expect("received");
+        assert_eq!(arrived.len(), 1);
+        assert_eq!(arrived[0].bytes, b"after");
+        let (_, events) = far_end.join().expect("thread");
+        assert!(matches!(&events[1], Event::Refused(_)), "{events:?}");
+        assert!(matches!(&events[2], Event::Iterated { kind, .. } if kind == "TRIM_HORIZON"));
+        assert!(matches!(events[3], Event::Read { count: 1, .. }));
     }
 
     #[test]
