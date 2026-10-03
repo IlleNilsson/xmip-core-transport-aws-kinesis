@@ -14,6 +14,7 @@
 //!
 //! ```text
 //! client.rs    Xmip's side: put a record, get an iterator, get records
+//! reading.rs   the place on the shard, and how a verdict moves it
 //! session.rs   the far end a test or the playground runs on loopback
 //! ```
 //!
@@ -27,19 +28,22 @@
 //! A record is bytes, base64 on the wire, one mebibyte at most:
 //! [`ceiling`]. A shard is read, never consumed — Kinesis keeps records for
 //! its retention period whoever has read them — so the transport keeps its
-//! own place, the last sequence number it handed on, and asks for the
-//! records after it next time. Nothing is claimed; [`Transport::claims`]
-//! answers `None`. The origin URI is `kinesis://stream/shard/sequence`. A
-//! send target is a stream name, or empty for this transport's own.
+//! own place, the last sequence number the runtime accepted after its whole
+//! receive cycle or refused for good, and asks for the records after it
+//! next time. The place moves only contiguously: a record whose cycle
+//! failed and what followed it are read again. Nothing is claimed;
+//! [`Transport::claims`] answers `None`. The origin URI is
+//! `kinesis://stream/shard/sequence`. A send target is a stream name, or
+//! empty for this transport's own.
 //!
 //! The transport is its own far end (ADR-0051): [`Loopback`] stands the
 //! session up at the endpoint's authority and takes the one put.
 
 pub mod client;
+mod reading;
 pub mod session;
 
 use std::net::TcpListener;
-use std::sync::Mutex;
 use std::time::Duration;
 
 use aws::json;
@@ -47,8 +51,9 @@ pub use client::{Client, MAX_RECORDS, Position, Record};
 use http::endpoint::Connections;
 use net::Endpoint;
 use net::ceiling;
+use reading::Reading;
 pub use session::{Event, Session};
-use transport::error::{Result, TransportError, protocol_error};
+use transport::error::{Result, protocol_error};
 use transport::listening::Listening;
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
 use transport::socket;
@@ -78,15 +83,6 @@ pub const fn ceiling() -> usize {
 /// The one shard a stream opens with, and the one the session holds.
 pub const SHARD: &str = "shardId-000000000000";
 
-/// Where a Receive Location reads its shard from: the sequence number it
-/// last handed on, and the iterator the last read handed back, kept so the
-/// next read asks for no new one.
-#[derive(Debug, Default)]
-struct Reading {
-    position: Option<String>,
-    iterator: Option<String>,
-}
-
 pub struct KinesisTransport {
     endpoint: String,
     region: String,
@@ -95,7 +91,7 @@ pub struct KinesisTransport {
     access_key: String,
     secret_key: String,
     partition_key: String,
-    reading: Mutex<Reading>,
+    reading: Reading,
     timeout: Option<Duration>,
     /// The connections kept to the service, shared by every client this
     /// makes.
@@ -116,7 +112,7 @@ impl KinesisTransport {
             access_key: String::new(),
             secret_key: String::new(),
             partition_key: "xmip".to_string(),
-            reading: Mutex::new(Reading::default()),
+            reading: Reading::default(),
             timeout: None,
             connections: Connections::new(),
         }
@@ -181,18 +177,10 @@ impl KinesisTransport {
         }
     }
 
-    /// The sequence number this transport last handed on, where it has.
-    ///
-    /// # Errors
-    /// Where a receive panicked holding the position.
-    pub fn position(&self) -> Result<Option<String>> {
-        Ok(self.reading()?.position.clone())
-    }
-
-    fn reading(&self) -> Result<std::sync::MutexGuard<'_, Reading>> {
-        self.reading
-            .lock()
-            .map_err(|_| TransportError::permanent("the shard position was poisoned"))
+    /// The sequence number of the last record accepted, where one has been.
+    #[must_use]
+    pub fn position(&self) -> Option<String> {
+        self.reading.position.at()
     }
 
     /// The stream a target names, or this transport's own where it names
@@ -215,39 +203,55 @@ impl Transport for KinesisTransport {
         Directions::BOTH
     }
 
-    /// Every record after the last one handed on, the oldest held where
-    /// none has been.
+    fn arrivals(&self) -> transport::Arrivals {
+        transport::Arrivals::Ordered("a cursor moves only contiguously")
+    }
+
+    /// Every record after the last one accepted, the oldest held where none
+    /// has been, each whole. A shard is never consumed: what a verdict
+    /// moves is this transport's own place — on
+    /// [`transport::Verdict::Accepted`] to the record, where it stands at
+    /// the one before; on `Refused` the same, as a shard has no place to
+    /// reject a record into and a refused one is not read again; on
+    /// `Failed` nowhere, so the next receive reads the failed record and
+    /// what followed it again.
     fn receive(&self) -> Result<Vec<Arrived>> {
         let client = self.client()?;
-        let mut reading = self.reading()?;
+        let mut iterator = self.reading.iterator();
+        let position = self.reading.position.at();
         // The iterator the last read handed back, where it is still good;
         // a new one from the position where it is missing or failed —
         // expired after five minutes unused, or its shard gone.
-        let kept = reading
-            .iterator
+        let kept = iterator
             .take()
             .and_then(|iterator| client.get_records(&iterator, MAX_RECORDS).ok());
         let (records, next) = if let Some(read) = kept {
             read
         } else {
-            let from = reading
-                .position
+            let from = position
                 .as_deref()
                 .map_or(Position::Oldest, Position::After);
             let iterator = client.shard_iterator(&self.stream, &self.shard, from)?;
             client.get_records(&iterator, MAX_RECORDS)?
         };
-        reading.iterator = next;
+        if records.is_empty() {
+            *iterator = next;
+            return Ok(Vec::new());
+        }
+        // The iterator is kept by the last record's acceptance, not here.
+        drop(iterator);
+        let mut after = position;
+        let last = records.len() - 1;
         let mut arrived = Vec::with_capacity(records.len());
-        for record in records {
-            reading.position = Some(record.sequence_number.clone());
-            arrived.push(Arrived::new(
-                format!(
-                    "kinesis://{}/{}/{}",
-                    self.stream, self.shard, record.sequence_number
-                ),
-                record.data,
-            ));
+        for (at, record) in records.into_iter().enumerate() {
+            let sequence_number = record.sequence_number;
+            let origin = format!("kinesis://{}/{}/{sequence_number}", self.stream, self.shard);
+            let kept = if at == last { next.clone() } else { None };
+            let acknowledgement =
+                self.reading
+                    .acknowledgement(after.clone(), sequence_number.clone(), kept);
+            after = Some(sequence_number);
+            arrived.push(Arrived::whole(origin, record.data, acknowledgement));
         }
         Ok(arrived)
     }
@@ -375,6 +379,7 @@ impl Loopback for KinesisTransport {
 mod tests {
     use super::*;
     use std::thread::JoinHandle;
+    use transport::Taken;
 
     fn node(endpoint: &str, secret: &str) -> KinesisTransport {
         KinesisTransport::new(endpoint, "eu-north-1", "orders")
@@ -445,7 +450,7 @@ mod tests {
         near.send("", b"UNA:+.? '").expect("its own stream");
         near.send("orders", &[0, 0xff, b'\r', b'\n'])
             .expect("a stream");
-        let arrived = near.receive().expect("received");
+        let arrived = taken(near.receive().expect("received"));
         assert_eq!(arrived.len(), 2);
         assert_eq!(arrived[0].bytes, b"UNA:+.? '");
         assert_eq!(arrived[1].bytes, [0, 0xff, b'\r', b'\n']);
@@ -456,11 +461,11 @@ mod tests {
         );
         assert!(near.receive().expect("received").is_empty(), "nothing new");
         near.send("", b"").expect("an empty record");
-        let later = near.receive().expect("received");
+        let later = taken(near.receive().expect("received"));
         assert_eq!(later.len(), 1, "only what came after");
         assert!(later[0].bytes.is_empty());
         assert_eq!(
-            near.position().expect("held").as_deref(),
+            near.position().as_deref(),
             Some(later[0].origin_uri.rsplit('/').next().unwrap_or_default())
         );
         let (session, events) = far_end.join().expect("thread");
@@ -469,13 +474,7 @@ mod tests {
             3,
             "a shard is read, not consumed"
         );
-        assert_eq!(
-            events[0],
-            Event::Put(Arrived::new(
-                arrived[0].origin_uri.clone(),
-                b"UNA:+.? '".to_vec()
-            ))
-        );
+        assert_eq!(events[0], Event::Put(arrived[0].clone()));
         assert!(matches!(&events[2], Event::Iterated { kind, .. } if kind == "TRIM_HORIZON"));
         assert!(matches!(events[3], Event::Read { count: 2, .. }));
         // The next reads go on with the iterator the last handed back.
@@ -493,14 +492,84 @@ mod tests {
         // expired one is: the refusal, a new iterator and its read.
         let far_end = serve(near.session(), listener, 4);
         near.send("", b"after").expect("put");
-        near.reading().expect("held").iterator = Some("orders/expired".to_string());
-        let arrived = near.receive().expect("received");
+        *near.reading.iterator() = Some("orders/expired".to_string());
+        let arrived = taken(near.receive().expect("received"));
         assert_eq!(arrived.len(), 1);
         assert_eq!(arrived[0].bytes, b"after");
         let (_, events) = far_end.join().expect("thread");
         assert!(matches!(&events[1], Event::Refused(_)), "{events:?}");
         assert!(matches!(&events[2], Event::Iterated { kind, .. } if kind == "TRIM_HORIZON"));
         assert!(matches!(events[3], Event::Read { count: 1, .. }));
+    }
+
+    /// Every arrival of one receive, accepted in order, as the runtime
+    /// accepts a cycle that completed.
+    fn taken(arrived: Vec<Arrived>) -> Vec<Taken> {
+        arrived
+            .into_iter()
+            .map(|one| one.taken().expect("accepted"))
+            .collect()
+    }
+
+    #[test]
+    fn a_refused_record_moves_the_place_past_it_and_is_not_read_again() {
+        let (listener, address) = socket::bind_tcp("127.0.0.1:0").expect("bind");
+        let near = node(&format!("http://{address}"), "secret");
+        // Three puts; a read refusing the second; the kept iterator reads
+        // nothing.
+        let far_end = serve(near.session(), listener, 6);
+        for payload in [&b"C1"[..], b"C2", b"C3"] {
+            near.send("", payload).expect("put");
+        }
+        let mut arrived = near.receive().expect("received").into_iter();
+        arrived.next().expect("C1").taken().expect("accepted");
+        arrived
+            .next()
+            .expect("C2")
+            .refused(transport::Refusal::Unacceptable)
+            .expect("refused");
+        let third = arrived.next().expect("C3").taken().expect("accepted");
+        let place = third.origin_uri.rsplit('/').next().map(str::to_string);
+        assert_eq!(near.position(), place, "past C2, at C3");
+        assert!(near.receive().expect("received").is_empty(), "C2 not again");
+        let (_, events) = far_end.join().expect("thread");
+        assert!(
+            matches!(events[5], Event::Read { count: 0, .. }),
+            "{events:?}"
+        );
+    }
+
+    #[test]
+    fn a_failed_record_and_what_followed_it_are_read_again_and_nothing_is_skipped() {
+        let (listener, address) = socket::bind_tcp("127.0.0.1:0").expect("bind");
+        let near = node(&format!("http://{address}"), "secret");
+        // Three puts; a read failing the second; a new iterator after the
+        // first and its read; then the kept iterator reads nothing.
+        let far_end = serve(near.session(), listener, 8);
+        for payload in [&b"C1"[..], b"C2", b"C3"] {
+            near.send("", payload).expect("put");
+        }
+        let mut arrived = near.receive().expect("received").into_iter();
+        assert!(arrived.as_slice().iter().all(Arrived::defers));
+        let first = arrived.next().expect("C1").taken().expect("accepted");
+        arrived.next().expect("C2").failed().expect("failed");
+        let third = arrived.next().expect("C3").taken().expect("accepted");
+        assert_eq!(
+            (first.bytes.as_slice(), third.bytes.as_slice()),
+            (&b"C1"[..], &b"C3"[..])
+        );
+        let place = first.origin_uri.rsplit('/').next().map(str::to_string);
+        assert_eq!(near.position(), place, "held at C1");
+        let again = taken(near.receive().expect("received again"));
+        let bytes: Vec<&[u8]> = again.iter().map(|t| t.bytes.as_slice()).collect();
+        assert_eq!(bytes, [&b"C2"[..], b"C3"], "C2 and what followed it");
+        assert!(near.receive().expect("received").is_empty(), "all accepted");
+        let (_, events) = far_end.join().expect("thread");
+        let after =
+            |e: &Event| matches!(e, Event::Iterated { kind, .. } if kind.starts_with("AFTER"));
+        assert!(after(&events[5]), "{events:?}");
+        assert!(matches!(events[6], Event::Read { count: 2, .. }));
+        assert!(matches!(events[7], Event::Read { count: 0, .. }));
     }
 
     #[test]
@@ -529,7 +598,7 @@ mod tests {
         assert_eq!(near.name(), "aws-kinesis");
         assert!(near.directions().receives() && near.directions().sends());
         assert!(near.receive().expect_err("nothing listening").retryable);
-        assert_eq!(near.position().expect("held"), None);
+        assert_eq!(near.position(), None);
         assert!(
             !node("kinesis.local", "s")
                 .send("", b"x")

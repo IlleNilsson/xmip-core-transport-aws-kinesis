@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use codec::base64;
 use serde_json::{Value, json};
-use transport::Arrived;
+use transport::Taken;
 use transport::error::Result;
 
 use crate::KINESIS;
@@ -31,7 +31,7 @@ use net::http::{Request, Response};
 pub enum Event {
     /// The client put a record; here is the Stream, its origin the stream,
     /// shard and sequence number it landed at.
-    Put(Arrived),
+    Put(Taken),
     /// The client asked for an iterator over `stream` of this kind.
     Iterated { stream: String, kind: String },
     /// The client read `count` records from `stream`.
@@ -133,7 +133,7 @@ impl Session {
         });
         let answer = json!({ "ShardId": SHARD, "SequenceNumber": sequence_number });
         (
-            Event::Put(Arrived::new(origin(stream, &sequence_number), data)),
+            Event::Put(Taken::new(origin(stream, &sequence_number), data)),
             json::answer(&answer),
         )
     }
@@ -271,7 +271,7 @@ mod tests {
         let origin = origin("orders", "000000000000000000001");
         assert_eq!(
             event,
-            Event::Put(Arrived::new(origin.clone(), b"a<b".to_vec()))
+            Event::Put(Taken::new(origin.clone(), b"a<b".to_vec()))
         );
         let iterate = json!({
             "StreamName": "orders", "ShardId": SHARD, "ShardIteratorType": "TRIM_HORIZON"
