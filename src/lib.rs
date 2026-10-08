@@ -53,6 +53,7 @@ use net::Endpoint;
 use net::ceiling;
 use reading::Reading;
 pub use session::{Event, Session};
+use transport::ArrivalIdentity;
 use transport::error::{Result, protocol_error};
 use transport::listening::Listening;
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
@@ -251,7 +252,7 @@ impl Transport for KinesisTransport {
                 self.reading
                     .acknowledgement(after.clone(), sequence_number.clone(), kept);
             after = Some(sequence_number);
-            arrived.push(Arrived::whole(origin, record.data, acknowledgement));
+            arrived.push(Arrived::whole(origin, record.data, acknowledgement).detected());
         }
         Ok(arrived)
     }
@@ -353,6 +354,12 @@ impl KinesisTransport {
 }
 
 impl Loopback for KinesisTransport {
+    fn arrival_identity(&self) -> ArrivalIdentity {
+        ArrivalIdentity::Unnamed(
+            "the broker delivers it and names no sender; the peer is the broker",
+        )
+    }
+
     fn ceiling(&self) -> Option<usize> {
         Some(ceiling())
     }
