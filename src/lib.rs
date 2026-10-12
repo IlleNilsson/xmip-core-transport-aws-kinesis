@@ -208,6 +208,10 @@ impl Transport for KinesisTransport {
         transport::Arrivals::Ordered("a cursor moves only contiguously")
     }
 
+    fn waiting(&self) -> transport::Waiting {
+        transport::Waiting::Polled("a GetRecords returns at once with what the shard holds")
+    }
+
     /// Every record after the last one accepted, the oldest held where none
     /// has been, each whole. A shard is never consumed: what a verdict
     /// moves is this transport's own place — on
