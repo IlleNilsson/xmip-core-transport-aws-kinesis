@@ -474,7 +474,7 @@ mod tests {
         near.send("", b"").expect("an empty record");
         let later = taken(near.receive().expect("received"));
         assert_eq!(later.len(), 1, "only what came after");
-        assert!(later[0].bytes.is_empty());
+        assert_eq!(later[0].bytes, [] as [u8; 0]);
         assert_eq!(
             near.position().as_deref(),
             Some(later[0].origin_uri.rsplit('/').next().unwrap_or_default())
