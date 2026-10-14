@@ -322,6 +322,6 @@ mod tests {
         );
         assert_eq!(response.status, 403);
         assert_eq!(session.records("orders").len(), 1);
-        assert!(session.records("invoices").is_empty());
+        assert_eq!(session.records("invoices"), []);
     }
 }
