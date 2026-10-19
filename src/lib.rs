@@ -220,7 +220,8 @@ impl Transport for KinesisTransport {
     /// reject a record into and a refused one is not read again; on
     /// `Failed` nowhere, so the next receive reads the failed record and
     /// what followed it again.
-    fn receive(&self) -> Result<Vec<Arrived>> {
+    fn receive_up_to(&self, most: usize) -> Result<Vec<Arrived>> {
+        let most = u16::try_from(most).map_or(MAX_RECORDS, |most| most.min(MAX_RECORDS));
         let client = self.client()?;
         let mut iterator = self.reading.iterator();
         let position = self.reading.position.at();
@@ -229,7 +230,7 @@ impl Transport for KinesisTransport {
         // expired after five minutes unused, or its shard gone.
         let kept = iterator
             .take()
-            .and_then(|iterator| client.get_records(&iterator, MAX_RECORDS).ok());
+            .and_then(|iterator| client.get_records(&iterator, most).ok());
         let (records, next) = if let Some(read) = kept {
             read
         } else {
@@ -237,7 +238,7 @@ impl Transport for KinesisTransport {
                 .as_deref()
                 .map_or(Position::Oldest, Position::After);
             let iterator = client.shard_iterator(&self.stream, &self.shard, from)?;
-            client.get_records(&iterator, MAX_RECORDS)?
+            client.get_records(&iterator, most)?
         };
         if records.is_empty() {
             *iterator = next;
@@ -261,8 +262,15 @@ impl Transport for KinesisTransport {
         Ok(arrived)
     }
 
-    fn send(&self, target: &str, bytes: &[u8]) -> Result<()> {
-        ceiling::within(bytes.len(), ceiling(), "one Kinesis record carries")?;
+    fn sending(&self) -> transport::Sending {
+        transport::Sending::Gathered(
+            "one Kinesis record carries the whole body, signed with its digest",
+        )
+    }
+
+    fn send_from(&self, target: &str, outgoing: transport::Outgoing<'_>) -> Result<()> {
+        ceiling::within(outgoing.len(), ceiling(), "one Kinesis record carries")?;
+        let bytes: &[u8] = &outgoing.gather()?;
         self.client()?
             .put_record(self.resolve(target), &self.partition_key, bytes)
             .map(|_| ())
