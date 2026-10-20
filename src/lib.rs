@@ -3,7 +3,7 @@
 //! Streams that arrive as records on a Kinesis data stream. One record is
 //! one Stream, its sequence number kept beside it.
 //!
-//! Kinesis is the event log of every organisation that lives in AWS, and
+//! Kinesis is the event log of every organization that lives in AWS, and
 //! its JSON API is three calls a Location makes: put a record on a stream,
 //! ask for an iterator over a shard at a position, take records with it. A
 //! Receive Location reads its shard on from where it last stopped and hands
@@ -18,7 +18,7 @@
 //! session.rs   the far end a test or the playground runs on loopback
 //! ```
 //!
-//! The endpoint, HTTP itself and the judgement of an answer come from the
+//! The endpoint, HTTP itself and the judgment of an answer come from the
 //! http technology; Signature Version 4 and the JSON 1.1 protocol from the
 //! AWS crate, where [`KINESIS`] names this service to it (ADR-0044). Until
 //! 2026-09-14 the signer came from the aws-sqs technology, a sideways
