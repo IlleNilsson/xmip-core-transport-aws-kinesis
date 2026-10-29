@@ -324,6 +324,9 @@ impl Configured for KinesisTransport {
         ],
     };
 
+    /// The schemes a Location's address is entered with to choose this technology.
+    const SCHEMES: &'static [&'static str] = &["kinesis"];
+
     fn configured(address: &str, settings: &Read) -> Result<Self> {
         // The access key and secret come through the Location's credentials.
         let mut transport = Self::new(address, settings.text("region"), settings.text("stream"));
