@@ -8,7 +8,8 @@
 //! Beside it is the iterator the last read handed back, kept only once
 //! every record that read handed on was accepted or refused.
 
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard};
+use xcore::lock::Locked;
 
 use transport::contiguous::Contiguous;
 use transport::{Acknowledgement, Verdict};
@@ -26,7 +27,7 @@ impl Reading {
     /// The iterator the last read handed back, held: `None` where the next
     /// read asks for a new one after the position.
     pub fn iterator(&self) -> MutexGuard<'_, Option<String>> {
-        self.iterator.lock().unwrap_or_else(PoisonError::into_inner)
+        self.iterator.locked()
     }
 
     /// How the record `sequence_number`, read after `after`, is
