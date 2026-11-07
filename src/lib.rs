@@ -400,6 +400,7 @@ impl Loopback for KinesisTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::assert_matches;
     use std::thread::JoinHandle;
     use transport::Taken;
 
@@ -497,11 +498,11 @@ mod tests {
             "a shard is read, not consumed"
         );
         assert_eq!(events[0], Event::Put(arrived[0].clone()));
-        assert!(matches!(&events[2], Event::Iterated { kind, .. } if kind == "TRIM_HORIZON"));
-        assert!(matches!(events[3], Event::Read { count: 2, .. }));
+        assert_matches!(&events[2], Event::Iterated { kind, .. } if kind == "TRIM_HORIZON");
+        assert_matches!(events[3], Event::Read { count: 2, .. });
         // The next reads go on with the iterator the last handed back.
-        assert!(matches!(events[4], Event::Read { count: 0, .. }));
-        assert!(matches!(events[6], Event::Read { count: 1, .. }));
+        assert_matches!(events[4], Event::Read { count: 0, .. });
+        assert_matches!(events[6], Event::Read { count: 1, .. });
         let iterated = |e: &&Event| matches!(e, Event::Iterated { .. });
         assert_eq!(events.iter().filter(iterated).count(), 1);
     }
@@ -519,9 +520,9 @@ mod tests {
         assert_eq!(arrived.len(), 1);
         assert_eq!(arrived[0].bytes, b"after");
         let (_, events) = far_end.join().expect("thread");
-        assert!(matches!(&events[1], Event::Refused(_)), "{events:?}");
-        assert!(matches!(&events[2], Event::Iterated { kind, .. } if kind == "TRIM_HORIZON"));
-        assert!(matches!(events[3], Event::Read { count: 1, .. }));
+        assert_matches!(&events[1], Event::Refused(_), "{events:?}");
+        assert_matches!(&events[2], Event::Iterated { kind, .. } if kind == "TRIM_HORIZON");
+        assert_matches!(events[3], Event::Read { count: 1, .. });
     }
 
     /// Every arrival of one receive, accepted in order, as the runtime
@@ -555,10 +556,7 @@ mod tests {
         assert_eq!(near.position(), place, "past C2, at C3");
         assert!(near.receive().expect("received").is_empty(), "C2 not again");
         let (_, events) = far_end.join().expect("thread");
-        assert!(
-            matches!(events[5], Event::Read { count: 0, .. }),
-            "{events:?}"
-        );
+        assert_matches!(events[5], Event::Read { count: 0, .. }, "{events:?}");
     }
 
     #[test]
@@ -590,8 +588,8 @@ mod tests {
         let after =
             |e: &Event| matches!(e, Event::Iterated { kind, .. } if kind.starts_with("AFTER"));
         assert!(after(&events[5]), "{events:?}");
-        assert!(matches!(events[6], Event::Read { count: 2, .. }));
-        assert!(matches!(events[7], Event::Read { count: 0, .. }));
+        assert_matches!(events[6], Event::Read { count: 2, .. });
+        assert_matches!(events[7], Event::Read { count: 0, .. });
     }
 
     #[test]
