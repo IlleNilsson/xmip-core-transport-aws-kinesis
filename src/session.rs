@@ -244,6 +244,7 @@ fn refused(status: u16, kind: &str, message: &str) -> (Event, Response) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::assert_matches;
 
     const AT: &str = "20260910T000000Z";
 
@@ -292,10 +293,10 @@ mod tests {
                 .expect("text")
                 .contains("\"NextShardIterator\":\"orders/1\"")
         );
-        assert!(matches!(event, Event::Read { count: 1, .. }));
+        assert_matches!(event, Event::Read { count: 1, .. });
         let read = json!({ "ShardIterator": "orders/1" });
         let (event, _) = session.answer(&signed("GetRecords", &read));
-        assert!(matches!(event, Event::Read { count: 0, .. }));
+        assert_matches!(event, Event::Read { count: 0, .. });
         let read = json!({ "ShardIterator": "invoices/0" });
         let (event, _) = session.answer(&signed("GetRecords", &read));
         assert_eq!(

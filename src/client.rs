@@ -184,6 +184,7 @@ fn record(value: &Value) -> Result<Record> {
 mod tests {
     use super::*;
     use crate::session::{Event, Session};
+    use std::assert_matches;
     use transport::socket;
 
     #[test]
@@ -233,8 +234,8 @@ mod tests {
         assert!(!missing.retryable);
         let (session, events) = far_end.join().expect("thread");
         assert_eq!(session.records("orders").len(), 2);
-        assert!(matches!(&events[2], Event::Iterated { kind, .. } if kind == "TRIM_HORIZON"));
-        assert!(matches!(&events[3], Event::Read { count: 2, .. }));
+        assert_matches!(&events[2], Event::Iterated { kind, .. } if kind == "TRIM_HORIZON");
+        assert_matches!(&events[3], Event::Read { count: 2, .. });
         assert_eq!(
             events[6],
             Event::Refused("ResourceNotFoundException".to_string())
