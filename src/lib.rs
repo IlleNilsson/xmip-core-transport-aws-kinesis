@@ -16,6 +16,7 @@
 //! client.rs    Xmip's side: put a record, get an iterator, get records
 //! reading.rs   the place on the shard, and how a verdict moves it
 //! session.rs   the far end a test or the essentials runs on loopback
+//! settings.rs  what a Location is configured with, declared once
 //! ```
 //!
 //! The endpoint, HTTP itself and the judgment of an answer come from the
@@ -42,6 +43,7 @@
 pub mod client;
 mod reading;
 pub mod session;
+mod settings;
 
 use std::net::TcpListener;
 use std::time::Duration;
@@ -58,8 +60,7 @@ use transport::error::{Result, protocol_error};
 use transport::listening::Listening;
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
 use transport::socket;
-use transport::{Arrived, Configured, Directions, Transport};
-use xcore::settings::{Applies, Fixed, Kind, Presence, Read, Setting, Settings};
+use transport::{Arrived, Directions, Transport};
 
 /// Kinesis as the JSON 1.1 protocol names it: the prefix of every target,
 /// and the exceptions that say come back — a shard's throughput, the
@@ -185,13 +186,9 @@ impl KinesisTransport {
     }
 
     /// The stream a target names, or this transport's own where it names
-    /// none.
+    /// none (`transport::destination::named`).
     fn resolve<'a>(&'a self, target: &'a str) -> &'a str {
-        if target.is_empty() {
-            &self.stream
-        } else {
-            target
-        }
+        transport::destination::named(target).unwrap_or(&self.stream)
     }
 }
 
@@ -277,72 +274,6 @@ impl Transport for KinesisTransport {
     }
 }
 
-impl Configured for KinesisTransport {
-    /// The address is the Kinesis endpoint, `https://kinesis.<region>.
-    /// amazonaws.com`. The access key and its secret are the Location's
-    /// credentials, not settings: a secret never is.
-    const SETTINGS: &'static Settings = &Settings {
-        technology: env!("CARGO_PKG_NAME"),
-        settings: &[
-            Setting {
-                name: "region",
-                kind: Kind::Text,
-                presence: Presence::Required,
-                meaning: "The AWS region requests are signed for, eu-north-1.",
-                applies: Applies::Both,
-            },
-            Setting {
-                name: "stream",
-                kind: Kind::Text,
-                presence: Presence::Required,
-                meaning: "The data stream read from, and put to when a send target names none.",
-                applies: Applies::Both,
-            },
-            Setting {
-                name: "shard",
-                kind: Kind::Text,
-                presence: Presence::Default(Fixed::Text(SHARD)),
-                meaning: "The shard a Receive Location reads; the stream's first when left out.",
-                applies: Applies::Receive,
-            },
-            Setting {
-                name: "partition_key",
-                kind: Kind::Text,
-                presence: Presence::Optional,
-                meaning: "The partition key a record is put under, which decides its shard; \
-                          one fixed key for every record when left out.",
-                applies: Applies::Send,
-            },
-            Setting {
-                name: "timeout",
-                kind: Kind::Duration,
-                presence: Presence::Optional,
-                meaning: "How long an endpoint that stops answering is waited on; unbounded \
-                          when left out.",
-                applies: Applies::Both,
-            },
-        ],
-    };
-
-    /// The schemes a Location's address is entered with to choose this technology.
-    const SCHEMES: &'static [&'static str] = &["kinesis"];
-
-    fn configured(address: &str, settings: &Read) -> Result<Self> {
-        // The access key and secret come through the Location's credentials.
-        let mut transport = Self::new(address, settings.text("region"), settings.text("stream"));
-        if let Some(shard) = settings.optional_text("shard") {
-            transport = transport.on_shard(shard);
-        }
-        if let Some(partition_key) = settings.optional_text("partition_key") {
-            transport = transport.keyed_by(partition_key);
-        }
-        Ok(match settings.optional_duration("timeout") {
-            Some(timeout) => transport.timing_out_after(timeout),
-            None => transport,
-        })
-    }
-}
-
 impl KinesisTransport {
     /// Both ends on this machine: the session stands in for Kinesis on an
     /// ephemeral local port, one stream and one credential, the loopback
@@ -402,13 +333,28 @@ mod tests {
     use super::*;
     use std::assert_matches;
     use std::thread::JoinHandle;
-    use transport::Taken;
+    use transport::{Configured, Taken};
+    use xcore::settings::Applies;
 
     fn node(endpoint: &str, secret: &str) -> KinesisTransport {
         KinesisTransport::new(endpoint, "eu-north-1", "orders")
             .with_credentials("AKID", secret)
             .keyed_by("probe")
             .timing_out_after(Duration::from_secs(2))
+    }
+
+    #[test]
+    fn a_send_location_puts_to_its_stream_and_a_target_naming_another_wins() {
+        use xcore::settings::Given;
+        let text = |name: &str, value: &str| (name.to_string(), Given::Text(value.to_string()));
+        let location = "kinesis://kinesis.eu-north-1.amazonaws.com";
+        let given = [text("region", "eu-north-1"), text("stream", "orders")];
+        let sent = KinesisTransport::open(location, Applies::Send, &given).expect("built");
+        assert_eq!(
+            sent.resolve(KinesisTransport::own_target(location)),
+            "orders"
+        );
+        assert_eq!(sent.resolve("invoices"), "invoices");
     }
 
     #[test]
