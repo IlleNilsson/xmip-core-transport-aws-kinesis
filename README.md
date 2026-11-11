@@ -2,6 +2,8 @@
 
 Amazon Kinesis Data Streams transport: Signature Version 4 over the JSON API — put a Stream as one record, read a shard on from where it last stopped — a stream and its shard are a Location. A technology of [xmip-core-transport](https://github.com/IlleNilsson/xmip-core-transport).
 
+A Send Location puts to the stream its `stream` setting names: it sends to the empty target (`Configured::own_target`, `transport::destination::OWN`), which it reads, through `transport::destination::named`, as that stream, its address naming only the endpoint. A target naming another stream still wins (ADR-0064, amendment 2026-11-10). What a Location is configured with is declared in `settings.rs`.
+
 Signature Version 4 and the JSON 1.1 protocol come from [xmip-core-transport-aws](https://github.com/IlleNilsson/xmip-core-transport-aws), where every AWS technology shares what AWS speaks over HTTP (ADR-0044, amendment 2026-09-24); HTTP itself comes from [xmip-core-transport-http](https://github.com/IlleNilsson/xmip-core-transport-http).
 
 A Receive Location reads on with the `NextShardIterator` the last read handed back, and asks `GetShardIterator` for a new one only on its first receive or where the kept one is refused — expired after five minutes unused, or its shard gone. Until 2026-09-28 every receive asked for a new iterator.
