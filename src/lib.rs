@@ -60,7 +60,7 @@ use transport::error::{Result, protocol_error};
 use transport::listening::Listening;
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
 use transport::socket;
-use transport::{Arrived, Directions, Transport};
+use transport::{Arrived, Configured, Directions, Transport};
 
 /// Kinesis as the JSON 1.1 protocol names it: the prefix of every target,
 /// and the exceptions that say come back — a shard's throughput, the
@@ -139,13 +139,6 @@ impl KinesisTransport {
     #[must_use]
     fn keyed_by(mut self, partition_key: &str) -> Self {
         self.partition_key = partition_key.to_string();
-        self
-    }
-
-    /// Give up on an endpoint that stops answering after `timeout`.
-    #[must_use]
-    pub const fn timing_out_after(mut self, timeout: Duration) -> Self {
-        self.timeout = Some(timeout);
         self
     }
 
