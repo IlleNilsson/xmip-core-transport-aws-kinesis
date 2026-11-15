@@ -43,14 +43,12 @@ impl Configured for KinesisTransport {
                           one fixed key for every record when left out.",
                 applies: Applies::Send,
             },
-            Setting {
-                name: "timeout",
-                kind: Kind::Duration,
-                presence: Presence::Optional,
-                meaning: "How long an endpoint that stops answering is waited on; unbounded \
-                          when left out.",
-                applies: Applies::Both,
-            },
+            transport::configured::timeout(
+                Applies::Both,
+                None,
+                "How long an endpoint that stops answering is waited on; unbounded \
+                 when left out.",
+            ),
         ],
     };
 
@@ -60,6 +58,10 @@ impl Configured for KinesisTransport {
     /// The stream setting: the address names only the endpoint.
     fn own_target(_address: &str) -> &str {
         transport::destination::OWN
+    }
+
+    fn timeout_kept(&mut self) -> Option<&mut dyn transport::configured::TimeoutKept> {
+        Some(&mut self.timeout)
     }
 
     fn configured(address: &str, settings: &Read) -> Result<Self> {
@@ -72,9 +74,6 @@ impl Configured for KinesisTransport {
         if let Some(partition_key) = settings.optional_text("partition_key") {
             transport = transport.keyed_by(partition_key);
         }
-        Ok(match settings.optional_duration("timeout") {
-            Some(timeout) => transport.timing_out_after(timeout),
-            None => transport,
-        })
+        Ok(transport)
     }
 }
