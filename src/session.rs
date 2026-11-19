@@ -21,6 +21,7 @@ use transport::error::Result;
 
 use crate::KINESIS;
 use crate::SHARD;
+use crate::settings::origin;
 use aws::json;
 use aws::sigv4::Signer;
 use http::server;
@@ -138,7 +139,7 @@ impl Session {
         });
         let answer = json!({ "ShardId": SHARD, "SequenceNumber": sequence_number });
         (
-            Event::Put(Taken::new(origin(stream, &sequence_number), data)),
+            Event::Put(Taken::new(origin(stream, SHARD, &sequence_number), data)),
             json::answer(&answer),
         )
     }
@@ -225,12 +226,6 @@ impl Session {
     }
 }
 
-/// The record at `sequence_number` on `stream`, as an origin says it.
-#[must_use]
-pub fn origin(stream: &str, sequence_number: &str) -> String {
-    format!("kinesis://{stream}/{SHARD}/{sequence_number}")
-}
-
 fn iterator(stream: &str, at: usize) -> String {
     format!("{stream}/{at}")
 }
@@ -274,11 +269,8 @@ mod tests {
                 .expect("text")
                 .contains("\"ShardId\":\"shardId-000000000000\"")
         );
-        let origin = origin("orders", "000000000000000000001");
-        assert_eq!(
-            event,
-            Event::Put(Taken::new(origin.clone(), b"a<b".to_vec()))
-        );
+        let origin = "aws-kinesis://orders/shardId-000000000000/000000000000000000001";
+        assert_eq!(event, Event::Put(Taken::new(origin, b"a<b".to_vec())));
         let iterate = json!({
             "StreamName": "orders", "ShardId": SHARD, "ShardIteratorType": "TRIM_HORIZON"
         });
