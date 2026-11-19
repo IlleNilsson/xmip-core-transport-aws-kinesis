@@ -16,7 +16,8 @@
 //! client.rs    Xmip's side: put a record, get an iterator, get records
 //! reading.rs   the place on the shard, and how a verdict moves it
 //! session.rs   the far end a test or the essentials runs on loopback
-//! settings.rs  what a Location is configured with, declared once
+//! settings.rs  what a Location is configured with, declared once, and the
+//!              scheme its address and a record's origin are written with
 //! ```
 //!
 //! The endpoint, HTTP itself and the judgment of an answer come from the
@@ -34,8 +35,9 @@
 //! next time. The place moves only contiguously: a record whose cycle
 //! failed and what followed it are read again. Nothing is claimed;
 //! [`Transport::claims`] answers `None`. The origin URI is
-//! `kinesis://stream/shard/sequence`. A send target is a stream name, or
-//! empty for this transport's own.
+//! `aws-kinesis://stream/shard/sequence`, under the scheme that is the
+//! technology's name. A send target is a stream name, or empty for this
+//! transport's own.
 //!
 //! The transport is its own far end (ADR-0051): [`Loopback`] stands the
 //! session up at the endpoint's authority and takes the one put.
@@ -241,7 +243,7 @@ impl Transport for KinesisTransport {
         let mut arrived = Vec::with_capacity(records.len());
         for (at, record) in records.into_iter().enumerate() {
             let sequence_number = record.sequence_number;
-            let origin = format!("kinesis://{}/{}/{sequence_number}", self.stream, self.shard);
+            let origin = settings::origin(&self.stream, &self.shard, &sequence_number);
             let kept = if at == last { next.clone() } else { None };
             let acknowledgement =
                 self.reading
@@ -340,7 +342,7 @@ mod tests {
     fn a_send_location_puts_to_its_stream_and_a_target_naming_another_wins() {
         use xcore::settings::Given;
         let text = |name: &str, value: &str| (name.to_string(), Given::Text(value.to_string()));
-        let location = "kinesis://kinesis.eu-north-1.amazonaws.com";
+        let location = "aws-kinesis://kinesis.eu-north-1.amazonaws.com";
         let given = [text("region", "eu-north-1"), text("stream", "orders")];
         let sent = KinesisTransport::open(location, Applies::Send, &given).expect("built");
         assert_eq!(
@@ -419,7 +421,7 @@ mod tests {
         assert!(
             arrived[0]
                 .origin_uri
-                .starts_with("kinesis://orders/shardId-000000000000/")
+                .starts_with("aws-kinesis://orders/shardId-000000000000/")
         );
         assert!(near.receive().expect("received").is_empty(), "nothing new");
         near.send("", b"").expect("an empty record");
@@ -596,7 +598,7 @@ mod tests {
         assert!(
             arrived
                 .origin_uri
-                .starts_with("kinesis://orders/shardId-000000000000/"),
+                .starts_with("aws-kinesis://orders/shardId-000000000000/"),
             "{}",
             arrived.origin_uri
         );

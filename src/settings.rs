@@ -1,5 +1,6 @@
 //! The settings a Location of this technology takes, declared once and read
-//! through (ADR-0064, amendment 2026-09-26).
+//! through (ADR-0064, amendment 2026-09-26), and the scheme its address and
+//! a record's origin are written with.
 
 use transport::Configured;
 use transport::error::Result;
@@ -52,8 +53,9 @@ impl Configured for KinesisTransport {
         ],
     };
 
-    /// The schemes a Location's address is entered with to choose this technology.
-    const SCHEMES: &'static [&'static str] = &["kinesis"];
+    /// The schemes a Location's address is entered with to choose this
+    /// technology: its name (ADR-0011, amendment 2026-11-19).
+    const SCHEMES: &'static [&'static str] = &["aws-kinesis"];
 
     /// The stream setting: the address names only the endpoint.
     fn own_target(_address: &str) -> &str {
@@ -83,4 +85,12 @@ impl Configured for KinesisTransport {
         self.connections = self.connections.timed_by(clock);
         self
     }
+}
+
+/// The record at `sequence_number` on `shard` of `stream`, as an origin
+/// says it, under the scheme above: `aws-kinesis://stream/shard/sequence`.
+/// The transport's receive and the session's put both name a record by it.
+#[must_use]
+pub(crate) fn origin(stream: &str, shard: &str, sequence_number: &str) -> String {
+    format!("aws-kinesis://{stream}/{shard}/{sequence_number}")
 }
