@@ -15,7 +15,7 @@
 //! ```text
 //! client.rs    Xmip's side: put a record, get an iterator, get records
 //! reading.rs   the place on the shard, and how a verdict moves it
-//! session.rs   the far end a test or the essentials runs on loopback
+//! session.rs   the far end a test or the System Tests run on loopback
 //! settings.rs  what a Location is configured with, declared once, and the
 //!              scheme its address and a record's origin are written with
 //! ```
@@ -163,7 +163,7 @@ impl KinesisTransport {
     }
 
     /// A far end that holds this transport's credentials and its stream,
-    /// for a test or the essentials to run on loopback.
+    /// for a test or the System Tests to run on loopback.
     #[must_use]
     pub fn session(&self) -> Session {
         let session = Session::new(&self.region, &self.access_key, &self.secret_key)

@@ -1,5 +1,5 @@
 //! The far end: enough of Kinesis to answer one Location, and what a test
-//! or the essentials puts on loopback.
+//! or the System Tests put on loopback.
 //!
 //! Not Kinesis. One session holds the streams it was told of, each one
 //! shard of records in memory, verifies every request against one
