@@ -10,8 +10,8 @@ use crate::{KinesisTransport, SHARD};
 
 impl Configured for KinesisTransport {
     /// The address is the Kinesis endpoint, `https://kinesis.<region>.
-    /// amazonaws.com`. The access key and its secret are not settings: a
-    /// secret never is.
+    /// amazonaws.com`. The access key ID is `access_key_id`; its secret
+    /// access key is the Location's `secret`, never a setting.
     const SETTINGS: &'static Settings = &Settings {
         technology: env!("CARGO_PKG_NAME"),
         settings: &[
@@ -22,6 +22,7 @@ impl Configured for KinesisTransport {
                 meaning: "The AWS region requests are signed for, eu-north-1.",
                 applies: Applies::Both,
             },
+            aws::access_key::ACCESS_KEY_ID,
             Setting {
                 name: "stream",
                 kind: Kind::Text,
@@ -67,9 +68,11 @@ impl Configured for KinesisTransport {
     }
 
     fn configured(address: &str, settings: &Read) -> Result<Self> {
-        // The access key and secret are never a setting; a Location naming a
-        // secret is refused, as by default (`Configured::secured_by`).
+        // The secret access key comes through the Location's secret.
         let mut transport = Self::new(address, settings.text("region"), settings.text("stream"));
+        if let Some(access_key) = settings.optional_text(aws::access_key::ACCESS_KEY_ID.name) {
+            transport.access_key = access_key.to_string();
+        }
         if let Some(shard) = settings.optional_text("shard") {
             transport = transport.on_shard(shard);
         }
@@ -77,6 +80,14 @@ impl Configured for KinesisTransport {
             transport = transport.keyed_by(partition_key);
         }
         Ok(transport)
+    }
+
+    /// The secret access key the Location's secret holds, signed with at
+    /// each request as its `access_key_id`; refused where it names none.
+    fn secured_by(mut self, secret: transport::Secured) -> Result<Self> {
+        let secret = aws::access_key::signing_as(&self.access_key, secret)?;
+        self.secret = Some(secret);
+        Ok(self)
     }
 
     /// The connections its clients share, an HTTP/2 one's frames in a span

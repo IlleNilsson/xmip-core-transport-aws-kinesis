@@ -100,6 +100,10 @@ pub struct KinesisTransport {
     /// The connections kept to the service, shared by every client this
     /// makes.
     connections: Connections,
+    /// The secret a Location names, the secret access key its requests are
+    /// signed with, read at each request (ADR-0019, amendment 2026-10-29;
+    /// ADR-0015, amendment 2026-11-25); `secret_key` where it names none.
+    secret: Option<transport::Secured>,
 }
 
 impl KinesisTransport {
@@ -119,6 +123,7 @@ impl KinesisTransport {
             reading: Reading::default(),
             timeout: None,
             connections: Connections::new(),
+            secret: None,
         }
     }
 
@@ -144,17 +149,17 @@ impl KinesisTransport {
         self
     }
 
-    /// The client this transport speaks through.
+    /// The client this transport speaks through, signing with the secret
+    /// the Location names as it is set now.
     ///
     /// # Errors
-    /// Where the endpoint is not an HTTP URL.
+    /// Where the endpoint is not an HTTP URL, or the Location's secret is
+    /// not set, cannot be read or is no password
+    /// (`transport::secured::presented`).
     pub fn client(&self) -> Result<Client> {
-        let client = Client::new(
-            &self.endpoint,
-            &self.region,
-            &self.access_key,
-            &self.secret_key,
-        )?;
+        let secret_key =
+            transport::secured::presented(self.secret.as_ref(), &self.secret_key, "aws-kinesis")?;
+        let client = Client::new(&self.endpoint, &self.region, &self.access_key, &secret_key)?;
         let client = client.sharing(self.connections.clone());
         Ok(match self.timeout {
             Some(timeout) => client.timing_out_after(timeout),
@@ -618,5 +623,49 @@ mod tests {
         let failure = kinesis.round(&over).expect_err("over the brim");
         assert!(failure.message.starts_with("send failed:"), "{failure}");
         assert!(failure.message.contains("1048576"), "{failure}");
+    }
+
+    /// A Location puts as its `access_key_id` with the secret access key the
+    /// secret it names holds, read at each request (ADR-0015, amendment
+    /// 2026-11-25).
+    #[test]
+    fn a_location_signs_with_the_secret_it_names_as_its_access_key_id() {
+        use std::sync::Arc;
+        use transport::secured::Kept;
+        use xcore::settings::Given;
+        let drawn = Kept::drawn();
+        let (listener, address) = socket::bind_tcp("127.0.0.1:0").expect("bind");
+        let endpoint = format!("http://{address}");
+        let text = |name: &str, value: &str| (name.to_string(), Given::Text(value.to_string()));
+        let given = [
+            text("region", "eu-north-1"),
+            text("stream", "orders"),
+            text("access_key_id", "AKIDPROBE"),
+        ];
+        let kept = Arc::new(Kept::default());
+        let near = KinesisTransport::open(&endpoint, Applies::Send, &given)
+            .expect("built")
+            .timing_out_after(Duration::from_secs(2))
+            .secured_by(kept.secured("partner-x.kinesis"))
+            .expect("presents its secret");
+        let unset = near.send("", b"UNA").expect_err("not set");
+        assert!(
+            unset.retryable && unset.message.contains("is not set"),
+            "{unset}"
+        );
+
+        kept.set("partner-x.kinesis", xcore::SecretKind::Password, &drawn);
+        let far = Session::new("eu-north-1", "AKIDPROBE", &drawn).with_stream("orders");
+        let far_end = serve(far.timing_out_after(Duration::from_secs(2)), listener, 1);
+        near.send("", b"UNA").expect("signed with the secret");
+        let (_, events) = far_end.join().expect("thread");
+        assert_matches!(&events[0], Event::Put(taken) if taken.bytes == b"UNA");
+
+        let unnamed = KinesisTransport::open(&endpoint, Applies::Send, &given[..2]).expect("built");
+        let Err(refused) = unnamed.secured_by(kept.secured("partner-x.kinesis")) else {
+            panic!("no access key ID to sign as");
+        };
+        assert!(!refused.retryable);
+        assert!(refused.message.contains("\"access_key_id\""), "{refused}");
     }
 }

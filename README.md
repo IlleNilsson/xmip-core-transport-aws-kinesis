@@ -6,6 +6,8 @@ A Send Location puts to the stream its `stream` setting names: it sends to the e
 
 Signature Version 4 and the JSON 1.1 protocol come from [xmip-core-transport-aws](https://github.com/IlleNilsson/xmip-core-transport-aws), where every AWS technology shares what AWS speaks over HTTP (ADR-0044, amendment 2026-09-24); HTTP itself comes from [xmip-core-transport-http](https://github.com/IlleNilsson/xmip-core-transport-http).
 
+A Location signs as the access key ID its `access_key_id` setting names, with the secret access key its `secret` holds: a `password` secret kept in the Administration Database and never in configuration, read at each request, so one set or replaced reaches the next request without a restart (ADR-0019, amendment 2026-10-29; ADR-0015, amendment 2026-11-25). A Location naming a secret and no `access_key_id` is refused as the node starts: Signature Version 4 names the access key ID with every signature (`aws::access_key`).
+
 A Receive Location reads on with the `NextShardIterator` the last read handed back, and asks `GetShardIterator` for a new one only on its first receive or where the kept one is refused — expired after five minutes unused, or its shard gone. Until 2026-09-28 every receive asked for a new iterator.
 
 ## How a received record is acknowledged
