@@ -13,11 +13,13 @@
 //! (ADR-0033).
 //!
 //! ```text
-//! client.rs    Xmip's side: put a record, get an iterator, get records
-//! reading.rs   the place on the shard, and how a verdict moves it
-//! session.rs   the far end a test or the System Tests run on loopback
-//! settings.rs  what a Location is configured with, declared once, and the
-//!              scheme its address and a record's origin are written with
+//! client.rs       Xmip's side: put a record, get an iterator, get records
+//! reading.rs      the place on the shard, and how a verdict moves it
+//! session.rs      the far end a test or the System Tests run on loopback
+//! declaration.rs  what a Location is configured with, declared once, and
+//!                 the scheme its address is written with
+//! configured.rs   how a Location is configured through that declaration,
+//!                 and the origin a record is written with
 //! ```
 //!
 //! The endpoint, HTTP itself and the judgment of an answer come from the
@@ -41,32 +43,54 @@
 //!
 //! The transport is its own far end (ADR-0051): [`Loopback`] stands the
 //! session up at the endpoint's authority and takes the one put.
+//!
+//! **Built with its `declaration` feature alone** the crate is
+//! [`declaration`], what a Location of it is configured with, and [`SHARD`],
+//! which its `shard` defaults to, and none of the code above, which is
+//! behind the default feature: what the surfaces' library carries
+//! (ADR-0064, amendment 2026-11-26).
 
+#[cfg(feature = "default")]
 pub mod client;
+#[cfg(feature = "default")]
+mod configured;
+#[cfg(feature = "declaration")]
+pub mod declaration;
+#[cfg(feature = "default")]
 mod reading;
+#[cfg(feature = "default")]
 pub mod session;
-mod settings;
 
+#[cfg(feature = "default")]
 use std::net::TcpListener;
+#[cfg(feature = "default")]
 use std::time::Duration;
 
+#[cfg(feature = "default")]
 use aws::json;
+#[cfg(feature = "default")]
 pub use client::{Client, MAX_RECORDS, Position, Record};
+#[cfg(feature = "default")]
 use http::endpoint::Connections;
-use net::Endpoint;
-use net::ceiling;
+#[cfg(feature = "default")]
+use net::{Endpoint, ceiling};
+#[cfg(feature = "default")]
 use reading::Reading;
+#[cfg(feature = "default")]
 pub use session::{Event, Session};
-use transport::ArrivalIdentity;
+#[cfg(feature = "default")]
 use transport::error::{Result, protocol_error};
-use transport::listening::Listening;
+#[cfg(feature = "default")]
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
-use transport::socket;
+#[cfg(feature = "default")]
+use transport::{ArrivalIdentity, listening::Listening, socket};
+#[cfg(feature = "default")]
 use transport::{Arrived, Configured, Directions, Transport};
 
 /// Kinesis as the JSON 1.1 protocol names it: the prefix of every target,
 /// and the exceptions that say come back — a shard's throughput, the
 /// account's limit, the key service's throttle, a failure of its own.
+#[cfg(feature = "default")]
 pub const KINESIS: json::Service = json::Service {
     name: "Kinesis",
     target: "Kinesis_20131202",
@@ -79,14 +103,18 @@ pub const KINESIS: json::Service = json::Service {
 };
 
 /// The largest record Kinesis carries: one mebibyte.
+#[cfg(feature = "default")]
 #[must_use]
 pub const fn ceiling() -> usize {
     1024 * 1024
 }
 
-/// The one shard a stream opens with, and the one the session holds.
+/// The one shard a stream opens with, and the one the session holds: what
+/// the declaration's `shard` defaults to, so built with it.
+#[cfg(feature = "declaration")]
 pub const SHARD: &str = "shardId-000000000000";
 
+#[cfg(feature = "default")]
 pub struct KinesisTransport {
     endpoint: String,
     region: String,
@@ -106,6 +134,7 @@ pub struct KinesisTransport {
     secret: Option<transport::Secured>,
 }
 
+#[cfg(feature = "default")]
 impl KinesisTransport {
     /// Speak to the Kinesis endpoint at `endpoint` — `https://kinesis.
     /// <region>.amazonaws.com` in the cloud, `http://host:port` for a
@@ -192,6 +221,7 @@ impl KinesisTransport {
     }
 }
 
+#[cfg(feature = "default")]
 impl Transport for KinesisTransport {
     fn name(&self) -> &'static str {
         "aws-kinesis"
@@ -248,7 +278,7 @@ impl Transport for KinesisTransport {
         let mut arrived = Vec::with_capacity(records.len());
         for (at, record) in records.into_iter().enumerate() {
             let sequence_number = record.sequence_number;
-            let origin = settings::origin(&self.stream, &self.shard, &sequence_number);
+            let origin = configured::origin(&self.stream, &self.shard, &sequence_number);
             let kept = if at == last { next.clone() } else { None };
             let acknowledgement =
                 self.reading
@@ -274,6 +304,7 @@ impl Transport for KinesisTransport {
     }
 }
 
+#[cfg(feature = "default")]
 impl KinesisTransport {
     /// Both ends on this machine: the session stands in for Kinesis on an
     /// ephemeral local port, one stream and one credential, the loopback
@@ -299,6 +330,7 @@ impl KinesisTransport {
     }
 }
 
+#[cfg(feature = "default")]
 impl Loopback for KinesisTransport {
     fn arrival_identity(&self) -> ArrivalIdentity {
         ArrivalIdentity::Unnamed(

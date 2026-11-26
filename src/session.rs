@@ -21,7 +21,7 @@ use transport::error::Result;
 
 use crate::KINESIS;
 use crate::SHARD;
-use crate::settings::origin;
+use crate::configured::origin;
 use aws::json;
 use aws::sigv4::Signer;
 use http::server;
