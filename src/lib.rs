@@ -45,10 +45,7 @@
 //! session up at the endpoint's authority and takes the one put.
 //!
 //! **Built with its `declaration` feature alone** the crate is
-//! [`declaration`], what a Location of it is configured with, and [`SHARD`],
-//! which its `shard` defaults to, and none of the code above, which is
-//! behind the default feature: what the surfaces' library carries
-//! (ADR-0064, amendment 2026-11-26).
+//! [`declaration`] and [`SHARD`], which its `shard` defaults to.
 
 #[cfg(feature = "default")]
 pub mod client;
